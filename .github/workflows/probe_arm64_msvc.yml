@@ -1,0 +1,70 @@
+name: Probe ARM64 MSVC
+
+on:
+  workflow_dispatch:
+    inputs:
+      toolset:
+        type: choice
+        default: '14.51'
+        options:
+          - '14.51'
+          - '14.50'
+      generator:
+        type: choice
+        default: Ninja
+        options:
+          - Ninja
+          - Visual Studio 18 2026
+
+permissions:
+  contents: read
+
+jobs:
+  isolate:
+    runs-on: windows-11-arm
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Select native ARM64 compiler
+        shell: pwsh
+        run: |
+          $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer"
+          $vs = & "$installer\vswhere.exe" -latest -products '*' -property installationPath
+          if (-not $vs) { throw 'Visual Studio not found' }
+          if ('${{ inputs.toolset }}' -eq '14.50') {
+            $arguments = @(
+              'modify', '--installPath', "`"$vs`"",
+              '--add', 'Microsoft.VisualStudio.Component.VC.14.50.18.0.ARM64',
+              '--quiet', '--norestart'
+            )
+            $process = Start-Process "$installer\setup.exe" -ArgumentList $arguments -Wait -PassThru
+            if ($process.ExitCode -notin 0, 3010) {
+              throw "Toolset installation failed: $($process.ExitCode)"
+            }
+          }
+          "PROBE_VS=$vs" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Isolate HDF5 compiler crash
+        shell: cmd
+        run: |
+          call "%PROBE_VS%\VC\Auxiliary\Build\vcvarsall.bat" arm64 10.0.26100.0 -vcvars_ver=${{ inputs.toolset }}
+          if errorlevel 1 exit /b %errorlevel%
+          set "PATH=%PROBE_VS%\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;%PATH%"
+          python ci\probe_arm64_msvc.py --root "%RUNNER_TEMP%\msvc-probe" --generator "${{ inputs.generator }}"
+        env:
+          CMAKE_GENERATOR_INSTANCE: ${{ inputs.generator == 'Visual Studio 18 2026' && env.PROBE_VS || '' }}
+          CMAKE_GENERATOR_TOOLSET: ${{ inputs.generator == 'Visual Studio 18 2026' && format('v145,version={0}', inputs.toolset) || '' }}
+      - name: Upload diagnostics without SDK headers or compiler binaries
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: msvc-${{ inputs.toolset }}-${{ inputs.generator }}
+          path: |
+            ${{ runner.temp }}\msvc-probe\logs
+            ${{ runner.temp }}\msvc-probe\hdf5-build\compile_commands.json
+            ${{ runner.temp }}\msvc-probe\hdf5-build\CMakeCache.txt
+            ${{ runner.temp }}\msvc-probe\hdf5-build\src\H5pubconf.h
