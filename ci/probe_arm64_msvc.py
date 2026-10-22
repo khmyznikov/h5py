@@ -40,6 +40,7 @@ def download(url, name):
 parser = argparse.ArgumentParser()
 parser.add_argument("--root", type=Path, required=True)
 parser.add_argument("--generator", default="Ninja")
+parser.add_argument("--expect-ice", action="store_true")
 args = parser.parse_args()
 root = args.root.resolve()
 logs = root / "logs"
@@ -87,7 +88,17 @@ run([
     f"-DCMAKE_INSTALL_PREFIX={root / 'hdf5-install'}",
     "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
 ], "hdf5-configure")
-sys.exit(run([
+code = run([
     "cmake", "--build", str(build), "--config", "Release",
     "--target", "hdf5-shared", "--verbose", "--parallel", "1",
-], "hdf5-build", check=False))
+], "hdf5-build", check=False)
+if args.expect_ice:
+    diagnostic = (logs / "hdf5-build.log").read_text(encoding="utf-8")
+    if not code or not all(
+        marker in diagnostic
+        for marker in ("H5Tinit_float.c", "fatal error C1001", "3765260340")
+    ):
+        raise RuntimeError("Expected H5Tinit_float.c compiler crash was not reproduced")
+    print("Expected H5Tinit_float.c C1001 / 0xE06D5034 reproduced.", flush=True)
+    sys.exit(0)
+sys.exit(code)

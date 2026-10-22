@@ -1,4 +1,5 @@
 name: Probe ARM64 MSVC
+run-name: ARM64 MSVC ${{ inputs.toolset }} - ${{ inputs.mode }}
 
 on:
   workflow_dispatch:
@@ -7,8 +8,17 @@ on:
         type: choice
         default: '14.51'
         options:
+          - '14.44'
           - '14.51'
           - '14.50'
+          - '14.51-initial'
+      mode:
+        type: choice
+        default: reproducer
+        options:
+          - reproducer
+          - hdf5
+          - latest
       generator:
         type: choice
         default: Ninja
@@ -21,6 +31,7 @@ permissions:
 
 jobs:
   isolate:
+    if: inputs.mode != 'latest'
     runs-on: windows-11-arm
     timeout-minutes: 35
     steps:
@@ -48,19 +59,55 @@ jobs:
             }
           }
           "PROBE_VS=$vs" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-      - name: Isolate HDF5 compiler crash
+      - name: Install first stable MSVC 14.51
+        if: inputs.toolset == '14.51-initial'
+        shell: pwsh
+        run: |
+          $vs = Join-Path $env:RUNNER_TEMP 'vs-18.6.0'
+          $bootstrapper = Join-Path $env:RUNNER_TEMP 'vs_BuildTools_18.6.0.exe'
+          $url = 'https://download.visualstudio.microsoft.com/download/pr/c40d2503-2e56-4f54-96c2-d886056cfedb/44f811a46b7556514b4fadc906ccc9685f96b63eeb8a36333425b3b315999c22/vs_BuildTools.exe'
+          Invoke-WebRequest $url -OutFile $bootstrapper
+          $signature = Get-AuthenticodeSignature $bootstrapper
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notlike '*Microsoft Corporation*') {
+            throw 'Invalid Microsoft bootstrapper signature'
+          }
+          $arguments = @(
+            '--installPath', "`"$vs`"",
+            '--add', 'Microsoft.VisualStudio.Component.VC.Tools.ARM64',
+            '--quiet', '--wait', '--norestart', '--nocache'
+          )
+          $process = Start-Process $bootstrapper -ArgumentList $arguments -Wait -PassThru
+          if ($process.ExitCode -notin 0, 3010) {
+            throw "Initial toolset installation failed: $($process.ExitCode)"
+          }
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $instances = & $vswhere -all -products '*' -format json | ConvertFrom-Json
+          $instance = $instances | Where-Object { $_.installationPath -eq $vs }
+          if ($instance.installationVersion -ne '18.6.11806.211') {
+            throw "Unexpected VS version: $($instance.installationVersion)"
+          }
+          "PROBE_VS=$vs" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Compile reduced reproducer and controls
+        if: inputs.mode == 'reproducer'
         shell: cmd
         run: |
-          call "%PROBE_VS%\VC\Auxiliary\Build\vcvarsall.bat" arm64 10.0.26100.0 -vcvars_ver=${{ inputs.toolset }}
+          call "%PROBE_VS%\VC\Auxiliary\Build\vcvarsall.bat" arm64 10.0.26100.0 -vcvars_ver=${{ startsWith(inputs.toolset, '14.51') && '14.51' || inputs.toolset }}
+          if errorlevel 1 exit /b %errorlevel%
+          python ci\probe_arm64_repro.py --output "%RUNNER_TEMP%\msvc-probe\logs" ${{ startsWith(inputs.toolset, '14.51') && '--expect-ice' || '' }}
+      - name: Isolate HDF5 compiler crash
+        if: inputs.mode == 'hdf5'
+        shell: cmd
+        run: |
+          call "%PROBE_VS%\VC\Auxiliary\Build\vcvarsall.bat" arm64 10.0.26100.0 -vcvars_ver=${{ startsWith(inputs.toolset, '14.51') && '14.51' || inputs.toolset }}
           if errorlevel 1 exit /b %errorlevel%
           set "PATH=%PROBE_VS%\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;%PATH%"
           python ci\probe_arm64_msvc.py --root "%RUNNER_TEMP%\msvc-probe" --generator "${{ inputs.generator }}"
         env:
           CMAKE_GENERATOR_INSTANCE: ${{ inputs.generator == 'Visual Studio 18 2026' && env.PROBE_VS || '' }}
-          CMAKE_GENERATOR_TOOLSET: ${{ inputs.generator == 'Visual Studio 18 2026' && format('v145,version={0}', inputs.toolset) || '' }}
+          CMAKE_GENERATOR_TOOLSET: ${{ inputs.generator == 'Visual Studio 18 2026' && format('{0},version={1}', inputs.toolset == '14.44' && 'v143' || 'v145', startsWith(inputs.toolset, '14.51') && '14.51' || inputs.toolset) || '' }}
       - name: Upload diagnostics without SDK headers or compiler binaries
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: msvc-${{ inputs.toolset }}-${{ inputs.generator }}
           path: |
@@ -68,3 +115,61 @@ jobs:
             ${{ runner.temp }}\msvc-probe\hdf5-build\compile_commands.json
             ${{ runner.temp }}\msvc-probe\hdf5-build\CMakeCache.txt
             ${{ runner.temp }}\msvc-probe\hdf5-build\src\H5pubconf.h
+
+  latest:
+    if: inputs.mode == 'latest'
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [stable, insiders]
+    runs-on: windows-11-arm
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Install latest public default and preview compilers into fresh instance
+        shell: pwsh
+        run: .\ci\install_latest_msvc.ps1 -Channel '${{ matrix.channel }}'
+      - name: Default compiler reduced reproducer
+        shell: cmd
+        run: |
+          call "%LATEST_VS%\VC\Auxiliary\Build\vcvarsall.bat" arm64 10.0.26100.0 -vcvars_ver=%LATEST_DEFAULT%
+          if errorlevel 1 exit /b %errorlevel%
+          python ci\probe_arm64_repro.py --output "%RUNNER_TEMP%\latest-default-repro\logs" ${{ matrix.channel == 'stable' && '--expect-ice' || '' }}
+      - name: Default compiler HDF5 2.2.0 Release build
+        shell: cmd
+        run: |
+          call "%LATEST_VS%\VC\Auxiliary\Build\vcvarsall.bat" arm64 10.0.26100.0 -vcvars_ver=%LATEST_DEFAULT%
+          if errorlevel 1 exit /b %errorlevel%
+          set "PATH=%LATEST_NINJA%;%PATH%"
+          python ci\probe_arm64_msvc.py --root "%RUNNER_TEMP%\latest-default-hdf5" --generator Ninja ${{ matrix.channel == 'stable' && '--expect-ice' || '' }}
+      - name: Newest preview compiler reduced reproducer
+        shell: cmd
+        run: |
+          call "%LATEST_VS%\VC\Auxiliary\Build\vcvarsall.bat" arm64 10.0.26100.0 -vcvars_ver=%LATEST_PREVIEW%
+          if errorlevel 1 exit /b %errorlevel%
+          python ci\probe_arm64_repro.py --output "%RUNNER_TEMP%\latest-preview-repro\logs"
+      - name: Newest preview compiler HDF5 2.2.0 Release build
+        shell: cmd
+        run: |
+          call "%LATEST_VS%\VC\Auxiliary\Build\vcvarsall.bat" arm64 10.0.26100.0 -vcvars_ver=%LATEST_PREVIEW%
+          if errorlevel 1 exit /b %errorlevel%
+          set "PATH=%LATEST_NINJA%;%PATH%"
+          python ci\probe_arm64_msvc.py --root "%RUNNER_TEMP%\latest-preview-hdf5" --generator Ninja
+      - name: Upload public diagnostics only
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: latest-${{ matrix.channel }}
+          path: |
+            ${{ runner.temp }}\latest-msvc\logs
+            ${{ runner.temp }}\latest-default-repro\logs
+            ${{ runner.temp }}\latest-default-hdf5\logs
+            ${{ runner.temp }}\latest-default-hdf5\hdf5-build\compile_commands.json
+            ${{ runner.temp }}\latest-preview-repro\logs
+            ${{ runner.temp }}\latest-preview-hdf5\logs
+            ${{ runner.temp }}\latest-preview-hdf5\hdf5-build\compile_commands.json
