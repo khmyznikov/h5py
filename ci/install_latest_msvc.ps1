@@ -45,6 +45,7 @@ if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notl
 $arguments = @(
     '--installPath', "`"$vs`"",
     '--channelUri', $channelUri,
+    '--add', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
     '--add', 'Microsoft.VisualStudio.Component.VC.Tools.ARM64',
     '--add', 'Microsoft.VisualStudio.Component.VC.Preview.ARM64',
     '--quiet', '--wait', '--norestart', '--nocache'
@@ -61,6 +62,12 @@ if ($instance.installationVersion -ne $catalog.info.buildVersion) {
     throw "Installed $($instance.installationVersion), catalog specified $($catalog.info.buildVersion)"
 }
 Get-ChildItem "$vs\VC\Tools\MSVC" -Directory | Select-Object -ExpandProperty Name
+if (-not (Test-Path "$vs\Common7\Tools\vsdevcmd\ext\vcvars.bat")) {
+    throw 'C++ developer-prompt extension was not installed'
+}
+Get-ChildItem "$vs\VC\Tools\MSVC" -Recurse -Filter cl.exe |
+    Select-Object -ExpandProperty FullName |
+    Tee-Object "$logs\installed-compilers.txt"
 "LATEST_VS=$vs" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
 "LATEST_NINJA=$ninja" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
 "LATEST_DEFAULT=$($default.version -replace '^(\d+\.\d+).*', '$1')" | Out-File $env:GITHUB_ENV -Append -Encoding utf8

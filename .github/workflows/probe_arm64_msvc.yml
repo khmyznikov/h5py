@@ -73,6 +73,7 @@ jobs:
           }
           $arguments = @(
             '--installPath', "`"$vs`"",
+            '--add', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
             '--add', 'Microsoft.VisualStudio.Component.VC.Tools.ARM64',
             '--quiet', '--wait', '--norestart', '--nocache'
           )
@@ -92,6 +93,8 @@ jobs:
         shell: cmd
         run: |
           call "%PROBE_VS%\VC\Auxiliary\Build\vcvarsall.bat" arm64 10.0.26100.0 -vcvars_ver=${{ startsWith(inputs.toolset, '14.51') && '14.51' || inputs.toolset }}
+          if errorlevel 1 exit /b %errorlevel%
+          where cl
           if errorlevel 1 exit /b %errorlevel%
           python ci\probe_arm64_repro.py --output "%RUNNER_TEMP%\msvc-probe\logs" ${{ startsWith(inputs.toolset, '14.51') && '--expect-ice' || '' }}
       - name: Isolate HDF5 compiler crash
@@ -139,6 +142,8 @@ jobs:
         run: |
           call "%LATEST_VS%\VC\Auxiliary\Build\vcvarsall.bat" arm64 10.0.26100.0 -vcvars_ver=%LATEST_DEFAULT%
           if errorlevel 1 exit /b %errorlevel%
+          where cl
+          if errorlevel 1 exit /b %errorlevel%
           python ci\probe_arm64_repro.py --output "%RUNNER_TEMP%\latest-default-repro\logs" ${{ matrix.channel == 'stable' && '--expect-ice' || '' }}
       - name: Default compiler HDF5 2.2.0 Release build
         shell: cmd
@@ -151,6 +156,8 @@ jobs:
         shell: cmd
         run: |
           call "%LATEST_VS%\VC\Auxiliary\Build\vcvarsall.bat" arm64 10.0.26100.0 -vcvars_ver=%LATEST_PREVIEW%
+          if errorlevel 1 exit /b %errorlevel%
+          where cl
           if errorlevel 1 exit /b %errorlevel%
           python ci\probe_arm64_repro.py --output "%RUNNER_TEMP%\latest-preview-repro\logs"
       - name: Newest preview compiler HDF5 2.2.0 Release build
